@@ -1,0 +1,11 @@
+venv/
+env/
+__pycache__/
+*.pyc
+.env
+database/mic_recordings/
+database/uploads/
+*.wav
+*.mp3
+*.ogg
+*.m4a
