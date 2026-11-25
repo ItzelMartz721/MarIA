@@ -294,6 +294,95 @@ function renderCommsDiagnostics(data) {
   }
 }
 
+let activeCommsView = 'spec';
+
+function selectCommsView(view) {
+    activeCommsView = view;
+    const views = ['spec', 'wave', '3d', 'radio'];
+
+    views.forEach(v => {
+        const btn = document.getElementById(`tab-btn-${v}`);
+        const panel = document.getElementById(`view-panel-${v}`);
+        if (v === view) {
+            btn?.classList.add('bg-indigo-600', 'text-white', 'shadow');
+            btn?.classList.remove('text-slate-400');
+            panel?.classList.remove('hidden');
+        } else {
+            btn?.classList.remove('bg-indigo-600', 'text-white', 'shadow');
+            btn?.classList.add('text-slate-400');
+            panel?.classList.add('hidden');
+        }
+    });
+
+    const alertBox = document.getElementById('ref-missing-alert');
+    if (alertBox && alertBox.dataset.hasError === 'true') {
+        if (view === 'spec' || view === 'wave') {
+            alertBox.classList.remove('hidden');
+        } else {
+            alertBox.classList.add('hidden');
+        }
+    }
+
+    if (view === '3d' && typeof Plotly !== 'undefined') {
+        const plotEl = document.getElementById('comms-3d-plot');
+        if (plotEl && plotEl.data) {
+            setTimeout(() => Plotly.Plots.resize(plotEl), 50);
+        }
+    }
+}
+
+function populateWaveformAndDiagnostics(data) {
+    const qWaveBox = document.getElementById('query-wave-box');
+    const qWaveImg = document.getElementById('query-wave-img');
+    if (data.query_waveform && qWaveBox && qWaveImg) {
+        qWaveImg.src = data.query_waveform;
+        qWaveBox.classList.remove('hidden');
+    } else {
+        qWaveBox?.classList.add('hidden');
+    }
+
+    const mWaveBox = document.getElementById('match-wave-box');
+    const mWaveImg = document.getElementById('match-wave-img');
+    if (data.match_waveform && mWaveBox && mWaveImg) {
+        mWaveImg.src = data.match_waveform;
+        mWaveBox.classList.remove('hidden');
+    } else {
+        mWaveBox?.classList.add('hidden');
+    }
+
+    const alertBox = document.getElementById('ref-missing-alert');
+    const reasonEl = document.getElementById('ref-missing-reason');
+    const metricsEl = document.getElementById('ref-missing-metrics');
+
+    if (alertBox) {
+        if (data.ref_visual_error) {
+            alertBox.dataset.hasError = 'true';
+            if (reasonEl) reasonEl.innerText = data.ref_visual_error;
+            if (metricsEl && data.comms_radiography) {
+                const r = data.comms_radiography;
+                metricsEl.innerText = `Indicadores capturados → SNR: ${r.snr_db ?? '--'} dB | RMS: ${r.rms_dbfs ?? '--'} dBFS | Duración: ${r.duration_s ?? '--'}s`;
+            }
+        } else {
+            alertBox.dataset.hasError = 'false';
+            alertBox.classList.add('hidden');
+        }
+    }
+
+    if (data.comms_radiography) {
+        const r = data.comms_radiography;
+        if (document.getElementById('tab-radio-snr')) document.getElementById('tab-radio-snr').innerText = `${r.snr_db ?? '--'} dB`;
+        if (document.getElementById('tab-radio-rms')) document.getElementById('tab-radio-rms').innerText = `${r.rms_dbfs ?? '--'} dBFS`;
+        if (document.getElementById('tab-radio-crest')) document.getElementById('tab-radio-crest').innerText = `${r.crest_factor_db ?? '--'} dB`;
+        if (document.getElementById('tab-radio-nyquist')) document.getElementById('tab-radio-nyquist').innerText = `${r.nyquist_hz ?? 11025} Hz / ${r.sample_rate ?? 22050} Hz`;
+        if (document.getElementById('tab-radio-dur')) document.getElementById('tab-radio-dur').innerText = `${r.duration_s ?? '--'} s`;
+        if (document.getElementById('tab-radio-badge') && r.channel_quality) {
+            document.getElementById('tab-radio-badge').innerText = r.channel_quality;
+        }
+    }
+
+    selectCommsView(activeCommsView || 'spec');
+}
+
 /**
  * Cambia la pista activa en el reproductor cuando el usuario selecciona
  * una de las canciones alternativas del ranking Top 5.
@@ -328,7 +417,7 @@ uploadBtn.addEventListener('click', () => {
 });
 
 audioFileInput.addEventListener('change', async (e) => {
-  const file = e.target.files;
+  const file = e.target.files[0];
   if (!file || isAnalyzing) return;
 
   const formData = new FormData();
@@ -569,6 +658,7 @@ async function sendAudioToBackend(formData, loadingMsg) {
       if (matchData) {
         showResultModal(matchData, data.ranking || []);
         renderCommsDiagnostics(data);
+        populateWaveformAndDiagnostics(data);
       } else {
         alert("⚠️ El servidor respondió con éxito, pero no envió datos de la canción.");
       }

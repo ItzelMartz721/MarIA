@@ -42,7 +42,7 @@ os.makedirs(MIC_ARCHIVE_FOLDER, exist_ok=True)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 AUDD_API_URL = "https://api.audd.io/"
-AUDD_API_TOKEN = ""
+AUDD_API_TOKEN = "88609ae861e11474fcd49a22f292f625"
 
 ALLOWED_EXTENSIONS = {'mp3', 'wav', 'webm', 'ogg', 'm4a'}
 
@@ -57,6 +57,44 @@ print("\n\n=== MarIA DSP Feature Extractor loaded successfully! ===")
 def index():
     """Renderiza la interfaz web principal."""
     return render_template('index.html')
+
+def generate_waveform_base64(audio_path, title_label="Forma de Onda (Dominio del Tiempo)", line_color="#38bdf8"):
+    """Genera una gráfica de forma de onda (Amplitud vs. Tiempo) en PNG Base64."""
+    if not audio_path or not os.path.exists(audio_path):
+        return None
+    try:
+        y, sr = librosa.load(audio_path, sr=22050, mono=True, duration=15.0)
+        if len(y) == 0:
+            return None
+        step = max(1, len(y) // 4000)
+        y_sub = y[::step]
+        t = np.linspace(0, len(y) / sr, num=len(y_sub))
+
+        fig, ax = plt.subplots(figsize=(8.5, 4.6), dpi=180)
+        fig.patch.set_facecolor('#0f172a')
+        ax.set_facecolor('#0f172a')
+        ax.plot(t, y_sub, color=line_color, linewidth=0.85, alpha=0.9)
+        ax.axhline(0, color='#475569', linewidth=0.7, linestyle='--')
+        ax.set_ylim(-1.05, 1.05)
+        ax.set_xlim(0, max(t[-1], 0.1))
+        ax.set_title(title_label, color='#f8fafc', fontsize=9, fontweight='bold', pad=6)
+        ax.set_xlabel("Tiempo (s)", color='#94a3b8', fontsize=7.5)
+        ax.set_ylabel("Amplitud Normalizada", color='#94a3b8', fontsize=7.5)
+        ax.tick_params(colors='#94a3b8', labelsize=7)
+        ax.grid(True, color='#1e293b', linestyle=':', linewidth=0.7)
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#334155')
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
+    except Exception as e:
+        print(f"⚠️ Error generando forma de onda: {e}")
+        return None
+
 
 def generate_spectrogram_base64(audio_path, title_label="Signal Spectrogram"):
     """Genera un espectrograma STFT de alta contraste codificado como PNG Base64 para visualización en frontend."""
@@ -166,6 +204,109 @@ def compute_comms_radiography(audio_path, is_mic_sample=False):
         print(f"⚠️ Radiography computation error: {e}")
         return None
 
+def generate_overlay_comparison_base64(query_path, ref_path, song_title="Pista"):
+    """
+    Compara la captura del micrófono contra la referencia de 30s:
+    - Panel superior: Superposición temporal alineada (con índice de correlación r).
+    - Panel inferior: Densidad Espectral de Potencia (PSD) superpuesta en frecuencia,
+      que sí coincide aunque el preview de Deezer empiece en otro segundo de la canción.
+    """
+    if not query_path or not ref_path or not os.path.exists(query_path) or not os.path.exists(ref_path):
+        return None
+
+    try:
+        sr = 16000
+        y_query, _ = librosa.load(query_path, sr=sr, mono=True, duration=15.0)
+        y_ref, _ = librosa.load(ref_path, sr=sr, mono=True, duration=30.0)
+
+        if len(y_query) == 0 or len(y_ref) == 0:
+            return None
+
+        # Normalizar amplitudes a [-1, 1]
+        y_q = y_query / (np.max(np.abs(y_query)) + 1e-8)
+        y_r = y_ref / (np.max(np.abs(y_ref)) + 1e-8)
+
+        # Alineación temporal por correlación cruzada de envolventes RMS
+        hop = 256
+        env_q = librosa.feature.rms(y=y_q, hop_length=hop)
+        env_r = librosa.feature.rms(y=y_r, hop_length=hop)
+
+        if len(env_r) >= len(env_q):
+            corr = correlate(env_r - np.mean(env_r), env_q - np.mean(env_q), mode='valid')
+            best_frame = int(np.argmax(corr))
+            segment_r = env_r[best_frame:best_frame + len(env_q)]
+            r_coef = float(np.corrcoef(env_q, segment_r)[0, 1]) if np.std(segment_r) > 0 else 0.0
+        else:
+            best_frame = 0
+            r_coef = 0.0
+
+        offset_sec = round((best_frame * hop) / sr, 2)
+        t_ref = np.arange(len(y_r)) / sr
+        t_query = (np.arange(len(y_q)) + best_frame * hop) / sr
+
+        # Etiqueta diagnóstica según si el fragmento cae dentro de los 30s del preview
+        if r_coef >= 0.45:
+            estado_tiempo = f"Tramo coincidente (Desfase: +{offset_sec}s | r = {r_coef:.2f})"
+        else:
+            estado_tiempo = f"Tramo fuera del preview de 30s (Mejor ajuste r = {r_coef:.2f} — ver espectro abajo)"
+
+        # Crear figura de 2 paneles: Tiempo arriba, Frecuencia (PSD) abajo
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9.2, 6.2), dpi=180)
+        fig.patch.set_facecolor('#0f172a')
+
+        # --- PANEL 1: Superposición en el Dominio del Tiempo ---
+        ax1.set_facecolor('#0f172a')
+        ax1.plot(t_ref, y_r, color='#38bdf8', linewidth=0.55, alpha=0.65, label='Referencia Deezer (30s)')
+        ax1.plot(t_query, y_q, color='#f472b6', linewidth=0.65, alpha=0.78, label='Captura Micrófono')
+        ax1.set_title(f"Dominio del Tiempo: {song_title} — {estado_tiempo}", color='#f8fafc', fontsize=8.8, fontweight='bold')
+        ax1.set_xlabel("Tiempo en preview de referencia (s)", color='#94a3b8', fontsize=7.5)
+        ax1.set_ylabel("Amplitud Norm.", color='#94a3b8', fontsize=7.5)
+        ax1.set_ylim(-1.1, 1.1)
+        ax1.grid(True, color='#1e293b', linestyle='--', linewidth=0.5)
+        ax1.tick_params(colors='#94a3b8', labelsize=7)
+        leg1 = ax1.legend(loc='upper right', facecolor='#1e293b', edgecolor='#334155', fontsize=7)
+        for text in leg1.get_texts():
+            text.set_color('#f8fafc')
+
+        # --- PANEL 2: Superposición en el Dominio de la Frecuencia (PSD Welch) ---
+        ax2.set_facecolor('#0f172a')
+        f_r, psd_r = welch(y_r, fs=sr, nperseg=2048)
+        f_q, psd_q = welch(y_q, fs=sr, nperseg=2048)
+
+        psd_r_db = 10 * np.log10(psd_r + 1e-12)
+        psd_q_db = 10 * np.log10(psd_q + 1e-12)
+        # Normalizar al pico (0 dB) para comparar la respuesta en frecuencia del canal
+        psd_r_db -= np.max(psd_r_db)
+        psd_q_db -= np.max(psd_q_db)
+
+        ax2.plot(f_r, psd_r_db, color='#38bdf8', linewidth=1.2, alpha=0.85, label='Espectro Referencia (Estudio)')
+        ax2.plot(f_q, psd_q_db, color='#f472b6', linewidth=1.2, alpha=0.85, label='Espectro Captura (Canal Micrófono)')
+        ax2.set_title("Dominio de la Frecuencia (PSD): Respuesta del Canal e Instrumentación", color='#f8fafc', fontsize=8.8, fontweight='bold')
+        ax2.set_xlabel("Frecuencia (Hz)", color='#94a3b8', fontsize=7.5)
+        ax2.set_ylabel("Potencia Relativa (dB)", color='#94a3b8', fontsize=7.5)
+        ax2.set_xlim(0, 8000)
+        ax2.set_ylim(-65, 3)
+        ax2.grid(True, color='#1e293b', linestyle='--', linewidth=0.5)
+        ax2.tick_params(colors='#94a3b8', labelsize=7)
+        leg2 = ax2.legend(loc='upper right', facecolor='#1e293b', edgecolor='#334155', fontsize=7)
+        for text in leg2.get_texts():
+            text.set_color('#f8fafc')
+
+        for ax in (ax1, ax2):
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#334155')
+
+        plt.tight_layout()
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return f"data:image/png;base64,{base64.b64encode(buf.read()).decode('utf-8')}"
+
+    except Exception as e:
+        print(f"⚠️ Error generando comparación superpuesta: {e}")
+        return None
+
 def find_local_song_filepath(title, artist):
     """Busca archivos de canciones locales en los directorios del proyecto; devuelve None para usar la vista previa externa del espectrograma."""
     if not title or title == "Unknown Track":
@@ -232,22 +373,23 @@ def analyze_audio():
         # 2. Calcular radiografía DSP (SNR, RMS, Crest Factor, Nyquist) y espectrograma de prueba
         comms_radiography = compute_comms_radiography(file_path, is_mic_sample=is_mic)
         query_spectrogram = generate_spectrogram_base64(file_path, title_label="Query Signal (Captured Audio)")
+        query_waveform = generate_waveform_base64(file_path, title_label="Forma de Onda: Muestra Capturada", line_color="#f472b6")
+
 
         # 3. Consultar PRIMERO API Externa (con audio acondicionado por Butterworth + AGC)
         print("\n\n\n=== Consultando API Externa como prioridad... ===\n")
         external_matches = recognize_with_external_api(file_path)
 
-        # 4. Consultar BD Local (como respaldo o complemento)
-        local_matches = match_audio(file_path, is_mic_sample=is_mic)
-
         if external_matches:
             ranked_matches = external_matches 
         else:
+            # 4. Consultar BD Local (como respaldo o complemento)
             print("\n\n === Sin resultado en API externa. Usando ranking de constelaciones locales... ===")
             ranked_matches = match_audio(file_path, is_mic_sample=is_mic)
 
         # 5. Preparar Top Match, preview de audio y espectrograma de referencia
         match_spectrogram = None
+        match_waveform = None
         if ranked_matches:
             top_match = ranked_matches[0]
             if not top_match.get("preview_url"):
@@ -256,22 +398,40 @@ def analyze_audio():
             ref_audio_path = find_local_song_filepath(top_match.get("title", ""), top_match.get("artist", ""))
             temp_ref_dl = None
 
-            if not ref_audio_path and top_match.get("preview_url"):
-                try:
-                    r_prev = requests.get(top_match["preview_url"], timeout=6)
-                    if r_prev.status_code == 200:
-                        temp_ref_dl = os.path.join(UPLOAD_FOLDER, f"spec_ref_{abs(hash(top_match['title']))}.mp3")
-                        with open(temp_ref_dl, "wb") as f_ref:
-                            f_ref.write(r_prev.content)
-                        ref_audio_path = temp_ref_dl
-                except Exception as e_dl:
-                    print(f"⚠️ No se pudo descargar preview para espectrograma: {e_dl}")
+            if not ref_audio_path:
+                urls_a_probar = []
+                # 1. Priorizar enlace fresco de Deezer (.mp3 directo)
+                url_deezer_fresca = get_audio_preview(top_match.get("title", ""), top_match.get("artist", ""))
+                if url_deezer_fresca:
+                    urls_a_probar.append(url_deezer_fresca)
+
+                # 2. Usar el de AudD (Deezer o Apple Music) como respaldo
+                if top_match.get("preview_url") and top_match["preview_url"] not in urls_a_probar:
+                    urls_a_probar.append(top_match["preview_url"])
+
+                for u in urls_a_probar:
+                    try:
+                        r_prev = requests.get(u, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+                        if r_prev.status_code == 200 and len(r_prev.content) > 10240:
+                            ext = ".m4a" if ".m4a" in u.lower() else ".mp3"
+                            temp_ref_dl = os.path.join(UPLOAD_FOLDER, f"spec_ref_{abs(hash(top_match['title']))}{ext}")
+                            with open(temp_ref_dl, "wb") as f_ref:
+                                f_ref.write(r_prev.content)
+                            ref_audio_path = temp_ref_dl
+                            top_match["preview_url"] = u
+                            break
+                    except Exception as e_dl:
+                        print(f"⚠️ No se pudo descargar preview para espectrograma: {e_dl}")
+
+
 
             if ref_audio_path:
                 match_spectrogram = generate_spectrogram_base64(
                     ref_audio_path,
                     title_label=f"Matched Reference: {top_match.get('title', 'Track')}"
                 )
+                match_waveform = generate_waveform_base64(ref_audio_path, title_label=f"Forma de Onda Referencia: {top_match.get('title', 'Pista')}", line_color="#38bdf8") if ref_audio_path else None
+
 
             if temp_ref_dl and os.path.exists(temp_ref_dl):
                 os.remove(temp_ref_dl)
@@ -292,7 +452,15 @@ def analyze_audio():
             "comms_radiography": comms_radiography,
             "query_spectrogram": query_spectrogram,
             "match_spectrogram": match_spectrogram,
-            "archived_recording": saved_mic_filename
+            "archived_recording": saved_mic_filename,
+            "query_waveform": query_waveform,
+            "match_waveform": match_waveform,
+            "ref_visual_error": (
+                None if (match_spectrogram or match_waveform)
+                else ("No se identificó ninguna pista coincidente." if not ranked_matches
+                    else ("El catálogo externo no devolvió enlace de audio de previsualización." if not top_match.get("preview_url")
+                            else "No se pudo descargar el audio de referencia desde el servidor externo (enlace expirado o HTTP 403)."))
+            )
         })
 
     except Exception as e:
@@ -373,8 +541,8 @@ def get_audio_preview(title, artist):
     try:
         clean_artist = artist if artist and artist != "Unknown Artist" else ""
         query = f"{title} {clean_artist}".strip()
-        url = "https://api.deezer.com"
-        params = {"q": query, "limit": 1}
+        url = "https://api.deezer.com/search"
+        params = {"q": query, "limit": 2}
         headers = {"User-Agent": "Mozilla/5.0"}
 
         res = requests.get(url, params=params, headers=headers, timeout=6)
